@@ -3,74 +3,64 @@ package com.levandr;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.Socket;
-import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.CompletableFuture;
+import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 
 public class Main {
 
     private static final int MIN_PORT_NUMBER = 0;
-    private static final int THREADS = 50;
     private static final int MAX_PORT_NUMBER = 65535;
     private static final int TIMEOUT = 65;
 
     public static void main(String[] args) {
-
-        List<String> hosts = new ArrayList<>();
-
-        hosts.add("loliland.ru");
-        hosts.add("kmpo.eljur.ru");
-        hosts.add("eljur.ru");
-        hosts.add("www.docentum.ru");
-        hosts.add("docentum.ru");
-        hosts.add("gmail.com");
+        List<String> hosts = List.of(
+                "loliland.ru",
+                "kmpo.eljur.ru",
+                "eljur.ru",
+                "www.docentum.ru",
+                "docentum.ru",
+                "gmail.com"
+        );
 
         List<OpenPortsResult> openPortsList = scan(hosts);
 
         // Вывод результатов
-        for (OpenPortsResult result : openPortsList) {
-            System.out.println("Host: " + result.getHost() + ", Open Ports: " + result.getOpenPorts());
-        }
+        openPortsList.forEach(result ->
+                System.out.println("Host: " + result.getHost() + ", Open Ports: " + result.getOpenPorts()));
     }
 
     private static List<OpenPortsResult> scan(List<String> hosts) {
-        System.out.println("Running...");
         System.out.println("Scanning ports");
 
-        ExecutorService executorService = Executors.newFixedThreadPool(THREADS);
-        List<OpenPortsResult> openPortsList = new ArrayList<>();
+        return hosts.parallelStream()
+                .map(host -> CompletableFuture.supplyAsync(() -> scanPorts(host)))
+                .map(CompletableFuture::join)
+                .collect(Collectors.toList());
+    }
 
-        for (String host : hosts) {
-            List<Integer> openPorts = new ArrayList<>();
-            for (int i = MIN_PORT_NUMBER; i <= MAX_PORT_NUMBER; i++) {
-                final int port = i;
-                executorService.execute(() -> {
-                    var inetSocketAddress = new InetSocketAddress(host, port);
+    private static OpenPortsResult scanPorts(String host) {
+        List<Integer> openPorts = IntStream.rangeClosed(MIN_PORT_NUMBER, MAX_PORT_NUMBER)
+                .parallel()  // использование параллельных потоков
+                .mapToObj(port -> CompletableFuture.supplyAsync(() -> checkPort(host, port)))
+                .map(CompletableFuture::join)
+                .filter(port -> port != -1)
+                .collect(Collectors.toList());
 
-                    try (var socket = new Socket()) {
-                        socket.connect(inetSocketAddress, TIMEOUT);
-                        System.out.printf("Host: %s, port %d is opened\n", host, port);
-                        openPorts.add(port);
-                    } catch (IOException e) {
-                        // Comment the line below if you don't want to print closed ports
-                        // System.err.println(host + " " + e.getMessage() + " on " + port + " port");
-                    }
-                });
-            }
-            openPortsList.add(new OpenPortsResult(host, openPorts));
+        return new OpenPortsResult(host, openPorts);
+    }
+
+    private static int checkPort(String host, int port) {
+        try (Socket socket = new Socket()) {
+            socket.connect(new InetSocketAddress(host, port), TIMEOUT);
+            System.out.printf("Host: %s, port %d is opened\n", host, port);
+            return port;
+        } catch (IOException e) {
+            // Comment the line below if you don't want to print closed ports
+            // System.err.println(host + " " + e.getMessage() + " on " + port + " port");
+            return -1;
         }
-
-        executorService.shutdown();
-        try {
-            executorService.awaitTermination(10, TimeUnit.MINUTES);
-        } catch (InterruptedException e) {
-            throw new RuntimeException(e);
-        }
-        System.out.println("Finish");
-
-        return openPortsList;
     }
 
     // Класс для хранения результатов открытых портов для каждого хоста
