@@ -17,7 +17,6 @@ import java.util.stream.Collectors;
 public class PortScanner {
 
     private final ExecutorService executorService;
-
     private static final Logger logger = LoggerFactory.getLogger(PortScanner.class);
 
     private static final int MIN_PORT_NUMBER = 0;
@@ -29,39 +28,40 @@ public class PortScanner {
     }
 
     public List<OpenPortsResult> scan(List<String> hosts, List<ProxyInfo> proxies) {
-        int totalPorts = (MAX_PORT_NUMBER - MIN_PORT_NUMBER + 1) * hosts.size();
-        System.out.println("Running...");
-        System.out.println("Scanning ports");
+        int totalPorts = (MAX_PORT_NUMBER - MIN_PORT_NUMBER + 1) * hosts.size() * proxies.size();
+        logger.info("Running...");
+        logger.info("Scanning ports");
 
-        List<OpenPortsResult> openPortsList = new ArrayList<>();
+        List<OpenPortsResult> openPortsList = Collections.synchronizedList(new ArrayList<>());
 
-        try {
-            openPortsList = hosts.parallelStream()
-                    .flatMap(host -> proxies.stream()
-                            .map(proxy -> CompletableFuture.supplyAsync(() -> scanPorts(host, proxy, totalPorts), executorService)))
-                    .map(CompletableFuture::join)
-                    .collect(Collectors.toList());
-        } finally {
-            shutdownThreadPool(executorService);
-            System.out.println("Finish");
+        for (String host : hosts) {
+            for (ProxyInfo proxy : proxies) {
+                CompletableFuture.runAsync(() ->
+                        scanPorts(host, proxy, totalPorts, openPortsList), executorService);
+            }
         }
 
+        CompletableFuture<Void> allOf = CompletableFuture.allOf(openPortsList.stream()
+                .map(CompletableFuture::completedFuture)
+                .toArray(CompletableFuture[]::new));
+
+        allOf.join();
+        logger.info("Finish");
         return openPortsList;
     }
 
-    private OpenPortsResult scanPorts(String host, ProxyInfo proxyInfo, int totalPorts) {
+    private void scanPorts(String host, ProxyInfo proxyInfo, int totalPorts, List<OpenPortsResult> openPortsList) {
         List<Integer> openPorts = Collections.synchronizedList(new ArrayList<>());
         AtomicInteger progress = new AtomicInteger(0);
 
         Proxy proxy = new Proxy(Proxy.Type.HTTP, new InetSocketAddress(proxyInfo.getHost(), proxyInfo.getPort()));
 
         try {
-            System.out.println("Scanning ports for host " + host + " using proxy " + proxyInfo.getHost() + ":" + proxyInfo.getPort());
+            logger.info("Scanning ports for host {} using proxy {}:{}", host, proxyInfo.getHost(), proxyInfo.getPort());
 
-            List<CompletableFuture<Void>> futures = new ArrayList<>();
             for (int port = MIN_PORT_NUMBER; port <= MAX_PORT_NUMBER; port++) {
                 int finalPort = port;
-                CompletableFuture<Void> future = CompletableFuture.runAsync(() -> {
+                CompletableFuture.runAsync(() -> {
                     try (Socket socket = new Socket(proxy)) {
                         socket.connect(new InetSocketAddress(host, finalPort), TIMEOUT);
                         openPorts.add(finalPort);
@@ -71,23 +71,16 @@ public class PortScanner {
                         int currentProgress = progress.incrementAndGet();
                         printProgressBar(currentProgress, totalPorts);
                     }
-                }, executorService);
-
-                futures.add(future);
+                }, executorService).join();
             }
-
-            CompletableFuture<Void> allOf = CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]));
-            allOf.join();
-
-            System.out.println(); // Move to the next line after the progress bar
         } catch (Exception e) {
-            // Handle exception if needed
+            logger.error("Error while scanning ports", e);
         }
 
-        return new OpenPortsResult(host, openPorts);
+        openPortsList.add(new OpenPortsResult(host, openPorts));
     }
 
-    private void printProgressBar(int current, int total) {
+    private static void printProgressBar(int current, int total) {
         int progressBarWidth = 50;
         int progress = (int) ((double) current / total * progressBarWidth);
 
@@ -95,20 +88,9 @@ public class PortScanner {
         for (int i = 0; i < progressBarWidth; i++) {
             progressBar.append(i < progress ? "=" : "-");
         }
-        progressBar.append("]");
+        progressBar.append("] " + current + "/" + total);
 
-        System.out.print("\r" + progressBar + " " + current + "/" + total);
-    }
-
-    private void shutdownThreadPool(ExecutorService executorService) {
-        executorService.shutdown();
-        try {
-            if (!executorService.awaitTermination(10, TimeUnit.MINUTES)) {
-                logger.error("ExecutorService did not terminate in the specified time.");
-            }
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new RuntimeException(e);
-        }
+        System.out.print("\r" + progressBar + "   ");
+        System.out.flush();
     }
 }
